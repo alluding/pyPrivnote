@@ -1,83 +1,79 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 
+from typing import Union, Optional, Dict
 
 from datetime import datetime
-import requests
+from tls_client import Session 
 
 from .exceptions import *
 from .constants import HEADERS
 from .util import is_email, score_password
 from .crypt import dec, enc
 
+session = Session(
+    client_identifier="chrome_119",
+    random_tls_extension_order=True
+)
 
 class PrivMessage(object):
-
-    def __init__(self):
-        self._plain_text = None
-        self._crypt_text = None
-        self._link = None
-        self._id = None
-        self._password = None
-        self._is_crypted = False
-        self._settings = None
-        self._response = None
+    def __init__(self) -> None:
+        self._plain_text: Optional[str] = None
+        self._crypt_text: Optional[bytes] = None
+        
+        self._link: Optional[str] = None
+        self._id: Optional[str] = None
+        
+        self._password: Optional[bytes] = None
+        self._is_crypted: bool = False
+        
+        self._settings: Optional[Dict[str, Union[str, int, bool]]] = None
+        self._response: Optional[Dict[str, Union[str, bool]]] = None
 
     @property
-    def password(self):
+    def password(self) -> str:
+        if not self._password:
+            raise ValueError("No password set, this note requires a password!")
+
         return self._password.decode()
 
     @password.setter
-    def password(self, value):
+    def password(self, value: Union[str, bytes]) -> None:
         if isinstance(value, str):
             self._password = value.encode("utf-8")
-        else:
-            self._password = value.encode("utf-8")
+        elif isinstance(value, (bytes, bytearray)):
+            self._password = value
 
     @property
-    def link(self):
+    def link(self) -> str:
         """
         Form link fallowing privnote rules
         :return: str
             Link to read the note. If no manual_password was given then password concatenates to link with '#' sep
         """
-        if self._response:
-            if self._response["has_manual_pass"]:
-                return self._response['note_link']
-            else:
-                return "%s#%s" % (self._response['note_link'], self.password)
-        else:
-            return "https://privnote.com/" + self._id
+        return self._response['note_link'] if self._response and self._response["has_manual_pass"] else f"{self._response['note_link']}#{self.password}"
 
     @link.setter
-    def link(self, value):
+    def link(self, value: str) -> None:
         """Set link and parse"""
 
-        if value.startswith("privnote.com/"):
-            value = "https://" + value
-        value = value.split(r"https://privnote.com/")[1]
-        value = value.split("#", maxsplit=1)
-        self._id = value[0]
-        if len(value) == 2 and value[1]:
-            self._password = bytes(value[1], encoding="utf-8")
+        value = value.split("https://privnote.com/")[1] if value.startswith("privnote.com/") else value
+        self._id, self._password = value.split("#", maxsplit=1) if "#" in value else (value, None)
 
     @property
-    def id(self):
-        if self._id:
-            return self._id
-        else:
-            return self._response['note_link'].replace(r"https://privnote.com/", "")
+    def id(self) -> str:
+        return self._id or self._response['note_link'].replace("https://privnote.com/", "")
 
     @id.setter
-    def id(self, value):
+    def id(self, value: str) -> None:
         self._id = value
         self._link = "https://privnote.com/" + value
 
     @property
-    def plain_text(self):
+    def plain_text(self) -> str:
         return self._plain_text
 
-    def read_and_destroy(self):
+    def read_and_destroy(self) -> None:
         """
         Receives note from privnote.com thereby destroy note and nobody can read it anymore
         :raises
@@ -86,26 +82,32 @@ class PrivMessage(object):
 
         """
         resp = requests.delete(self.link, headers=HEADERS)
-
-        exc = None
+        
         try:
             self._response = resp.json()
         except ValueError:
-            exc = True
-        if exc:
             raise IncorrectIDException(note_id=self._id)
-
+            
         if not self._response.get("data"):
             if self._response.get("destroyed"):
-                raise NoteDestroyedException(note_id=self._id,
-                                             destroyed=datetime.strptime(self._response["destroyed"],
-                                                                         "%Y-%m-%dT%H:%M:%S.%f"))
+                raise NoteDestroyedException(
+                    note_id=self._id, 
+                    destroyed=datetime.strptime(self._response["destroyed"], "%Y-%m-%dT%H:%M:%S.%f")
+                )
             else:
                 raise PrivnoteException("No data in response")
+                
         self._crypt_text = self._response['data']
 
-    def set_settings(self, data, manual_pass=False, duration_hours=None,
-                     ask_confirm=True, notify_email=False, email_ref_name=''):
+    def set_settings(
+        self, 
+        data: str, 
+        manual_pass: Union[str, bytes] = False, 
+        duration_hours: Optional[int] = None, 
+        ask_confirm: bool = True, 
+        notify_email: Union[str, bool] = False, 
+        email_ref_name: str = ''
+    ) -> str:
         """
         Parse and stores arguments. Forms settings dict to send. Forms data and password to encrypt
 
@@ -135,51 +137,30 @@ class PrivMessage(object):
             Notelink for reading Note. If manual_pass was given, autogenerating password concatenate to link
         """
 
-        settings = {}
+        settings = {'data_type': 'T'}
+        password = manual_pass if isinstance(manual_pass, (str, bytes)) else score_password()
+        settings['has_manual_pass'] = "true" if manual_pass else "false"
 
-        if type(data) != str:
-            raise TypeError("Argument 'data' must be string, not %s" % type(data))
-        if data == "":
-            raise ValueError("Argument data must not be empty")
-        settings['data_type'] = 'T'
-
-        if manual_pass:
-            if isinstance(manual_pass, (str, bytearray, bytes)):
-                password = manual_pass
-                settings['has_manual_pass'] = "true"
-            else:
-                raise TypeError("Argument 'manual_pass' must be str or bytes-like")
-        else:
-            password = score_password()
-            settings['has_manual_pass'] = "false"
-
-        if duration_hours:
-            settings['duration_hours'] = duration_hours
-        else:
-            settings['duration_hours'] = 0
-
-        if ask_confirm:
-            settings['dont_ask'] = "false"
-        else:
-            settings['dont_ask'] = "true"
-
+        if duration_hours is not None and duration_hours > 720:
+            raise ValueError("Duration hours cannot exceed 720.")
+            
+        settings['duration_hours'] = duration_hours or 0
+        settings['dont_ask'] = str(not ask_confirm)
+        
         if notify_email:
             if is_email(notify_email):
                 settings['notify_email'] = notify_email
-                if email_ref_name:
-                    settings['notify_ref'] = email_ref_name
-                else:
-                    settings['notify_ref'] = ""
+                settings['notify_ref'] = email_ref_name
             else:
-                raise ValueError("Notify email is incorrect")
+                raise ValueError("Notify email is incorrect!")
         else:
             settings['notify_email'] = settings['notify_ref'] = ""
-
+            
         self._plain_text = data
         self.password = password
         self._settings = settings
 
-    def decrypt(self):
+    def decrypt(self) -> None:
         """Decrypts note"""
 
         try:
@@ -187,7 +168,7 @@ class PrivMessage(object):
         except ValueError:
             raise IncorrectPasswordException(note_id=self._id)
 
-    def encrypt(self):
+    def encrypt(self) -> None:
         """Encrypts note"""
 
         try:
@@ -195,10 +176,16 @@ class PrivMessage(object):
         except ValueError:
             raise IncorrectPasswordException(note_id=self._id)
 
-    def send(self):
+    def send(self) -> None:
         """Sends data with note settings to privnote server and stores response"""
 
-        data_to_send = self._settings.copy()
-        data_to_send['data'] = self._crypt_text.decode()
-        response = requests.post("https://privnote.com/legacy/", data=data_to_send, headers=HEADERS)
+        data_to_send = {
+            **self._settings, 
+            'data': self._crypt_text.decode()
+        }
+        response = requests.post(
+            "https://privnote.com/legacy/", 
+            data=data_to_send, 
+            headers=HEADERS
+        )
         self._response = response.json()
