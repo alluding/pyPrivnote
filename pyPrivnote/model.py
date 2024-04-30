@@ -81,7 +81,7 @@ class PrivMessage(object):
             IncorrectIDException if note with id cant be fond
 
         """
-        resp = requests.delete(self.link, headers=HEADERS)
+        resp = session.delete(self.link, headers=HEADERS)
         
         try:
             self._response = resp.json()
@@ -183,7 +183,7 @@ class PrivMessage(object):
             **self._settings, 
             'data': self._crypt_text.decode()
         }
-        response = requests.post(
+        response = session.post(
             "https://privnote.com/legacy/", 
             data=data_to_send, 
             headers=HEADERS
